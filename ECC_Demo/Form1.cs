@@ -1,13 +1,7 @@
-using System;
-using System.Collections.Generic;
-using System.Drawing;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace ECC_Demo
 {
@@ -17,22 +11,23 @@ namespace ECC_Demo
         private TcpListener? _server;
         private TcpClient? _client;
         private NetworkStream? _stream;
-        private bool _isServer = false; // Unused
+        private bool _isServer = false;
 
         // Cryptography - ECDH (Chat)
         private ECDiffieHellmanCng? _myEcdh;
         private byte[]? _sharedSecret;
 
         // Cryptography - ECDSA (Notary)
-        // We create fresh keys for each signing operation or could persist them.
-        // For this demo: Generate on Sign, Load on Verify.
+        // Create fresh keys for each signing operation for this demo.
 
         public Form1()
         {
             InitializeComponent();
         }
 
-        // --- TAB 1: Network Chat (ECDHE + ECIES) ---
+        // ========================================================================
+        // TAB 1: Network Chat (ECDHE + ECIES)
+        // ========================================================================
 
         // 1. Connection Logic
         private async void btnStartServer_Click(object sender, EventArgs e)
@@ -43,14 +38,15 @@ namespace ECC_Demo
                 _server = new TcpListener(IPAddress.Any, port);
                 _server.Start();
                 _isServer = true;
-                Log($"Server started on port {port}. Waiting for peer...", Color.White);
+                Log($"[NET] Server started on port {port}.", Color.Cyan);
+                Log("[NET] Waiting for incoming connection...", Color.White);
 
                 // Accept one client
                 _client = await _server.AcceptTcpClientAsync();
-                Log("Peer connected!", Color.Green);
-                
+                Log("[NET] Peer connected successfully!", Color.Lime);
+
                 _stream = _client.GetStream();
-                
+
                 // Start Handshake immediately
                 await PerformHandshakeAsync();
 
@@ -59,7 +55,7 @@ namespace ECC_Demo
             }
             catch (Exception ex)
             {
-                Log($"Server Error: {ex.Message}", Color.Red);
+                Log($"[ERROR] Server Error: {ex.Message}", Color.Red);
             }
         }
 
@@ -69,9 +65,10 @@ namespace ECC_Demo
             {
                 int port = int.Parse(txtTargetPort.Text);
                 _client = new TcpClient();
-                Log($"Connecting to localhost:{port}...", Color.White);
+                Log($"[NET] Attempting connection to 127.0.0.1:{port}...", Color.Cyan);
+
                 await _client.ConnectAsync("127.0.0.1", port);
-                Log("Connected to Peer!", Color.Green);
+                Log("[NET] Connection established!", Color.Lime);
 
                 _stream = _client.GetStream();
 
@@ -84,7 +81,7 @@ namespace ECC_Demo
             }
             catch (Exception ex)
             {
-                Log($"Connection Error: {ex.Message}", Color.Red);
+                Log($"[ERROR] Connection Error: {ex.Message}", Color.Red);
             }
         }
 
@@ -93,24 +90,32 @@ namespace ECC_Demo
         {
             try
             {
+                Log("---------------------------------------------------------------", Color.Gray);
+                Log("[ECDHE] Starting Ephemeral Key Exchange...", Color.Yellow);
+
                 // Generate Ephemeral Keys
                 _myEcdh = new ECDiffieHellmanCng(256);
                 _myEcdh.KeyDerivationFunction = ECDiffieHellmanKeyDerivationFunction.Hash;
                 _myEcdh.HashAlgorithm = CngAlgorithm.Sha256;
-                Log("Generated Ephemeral ECDH Key Pair (P-256).", Color.Cyan);
+                Log("[ECDHE] Generated local Key Pair (Curve P-256).", Color.White);
 
                 // Export Public Key
-                #pragma warning disable SYSLIB0043
+#pragma warning disable SYSLIB0043
                 byte[] myPublicKey = _myEcdh.PublicKey.ToByteArray();
-                #pragma warning restore SYSLIB0043
+#pragma warning restore SYSLIB0043
+
+                string hexKey = BitConverter.ToString(myPublicKey).Replace("-", "");
+                Log($"[ECDHE] My Public Key ({myPublicKey.Length} bytes):", Color.Gray);
+                Log($"        {hexKey.Substring(0, 32)}...", Color.Gray);
 
                 // Send Public Key Packet (Type 1)
                 await SendPacketAsync(1, myPublicKey);
-                Log("Sent Public Key to Peer.", Color.White);
+                Log("[NET] Sent Public Key packet to peer.", Color.White);
+                Log("---------------------------------------------------------------", Color.Gray);
             }
             catch (Exception ex)
             {
-                Log($"Handshake Init Error: {ex.Message}", Color.Red);
+                Log($"[ERROR] Handshake Init Error: {ex.Message}", Color.Red);
             }
         }
 
@@ -148,48 +153,61 @@ namespace ECC_Demo
             }
             catch (Exception ex)
             {
-                Log($"Receive Error: {ex.Message}", Color.Red);
+                Log($"[NET] Receive Loop Error: {ex.Message}", Color.Red);
             }
             finally
             {
-                Log("Disconnected.", Color.Orange);
+                Log("[NET] Disconnected from peer.", Color.Orange);
             }
         }
 
         private void ProcessPacket(byte type, byte[] payload)
         {
             // Marshal Key Derivation / Decryption to UI thread for logging safety
-            // (Or keep logic here and only Invoke the Log calls. We'll Invoke Log)
+            if (rtbChatLog.InvokeRequired)
+            {
+                rtbChatLog.Invoke(new Action(() => ProcessPacket(type, payload)));
+                return;
+            }
 
             if (type == 1) // Handshake (Peer Public Key)
             {
                 try
                 {
-                    Log($"Received Peer Public Key ({payload.Length} bytes).", Color.White);
+                    Log("---------------------------------------------------------------", Color.Gray);
+                    string hexPeer = BitConverter.ToString(payload).Replace("-", "");
+                    Log($"[NET] Received Peer Public Key ({payload.Length} bytes):", Color.Yellow);
+                    Log($"      {hexPeer.Substring(0, 32)}...", Color.Gray);
+
                     if (_myEcdh == null) return;
 
-                    // Provide Import method proper hint
+                    // Import Peer Key & Derive Secret
                     using (CngKey peerKey = CngKey.Import(payload, CngKeyBlobFormat.EccPublicBlob))
                     {
+                        Log("[ECDH] Computing Shared Secret (ECDH)...", Color.White);
                         _sharedSecret = _myEcdh.DeriveKeyMaterial(peerKey);
                     }
 
-                    Log("Derived Shared Secret successfully!", Color.Lime);
-                    Log($"Secret Hash: {BitConverter.ToString(_sharedSecret).Substring(0, 10)}...", Color.Gray);
+                    string hexSecret = BitConverter.ToString(_sharedSecret).Replace("-", "");
+                    Log("[ECDH] Shared Secret Derived Successfully!", Color.Lime);
+                    Log($"       Secret (AES Key): {hexSecret}", Color.Lime);
+                    Log("---------------------------------------------------------------", Color.Gray);
                 }
                 catch (Exception ex)
                 {
-                    Log($"Handshake Error: {ex.Message}", Color.Red);
+                    Log($"[ERROR] Handshake Processing Error: {ex.Message}", Color.Red);
                 }
             }
             else if (type == 2) // Encrypted Message
             {
                 try
                 {
-                    Log($"Received Encrypted Message ({payload.Length} bytes).", Color.White);
+                    Log("[NET] Received Encrypted Payload:", Color.Yellow);
+                    Log($"      Bytes: {BitConverter.ToString(payload).Replace("-", "")}", Color.Gray);
+
                     if (_sharedSecret == null)
                     {
-                        Log("Error: No Shared Secret. Cannot Decrypt.", Color.Red);
+                        Log("[ERROR] No Shared Secret established. Cannot decrypt.", Color.Red);
                         return;
                     }
 
@@ -197,7 +215,7 @@ namespace ECC_Demo
                     using (Aes aes = Aes.Create())
                     {
                         aes.Key = _sharedSecret;
-                        
+
                         // Extract IV (First 16 bytes for AES)
                         byte[] iv = new byte[aes.BlockSize / 8];
                         byte[] cipherText = new byte[payload.Length - iv.Length];
@@ -207,18 +225,21 @@ namespace ECC_Demo
 
                         aes.IV = iv;
 
+                        Log($"[ECIES] Decrypting with Shared Secret...", Color.White);
+                        Log($"        IV: {BitConverter.ToString(iv).Replace("-", "")}", Color.Gray);
+
                         using (var decryptor = aes.CreateDecryptor())
                         {
                             byte[] plainBytes = decryptor.TransformFinalBlock(cipherText, 0, cipherText.Length);
                             string message = Encoding.UTF8.GetString(plainBytes);
-                            
-                            Log($"Peer: {message}", Color.Yellow);
+
+                            Log($"[CHAT] Peer says: {message}", Color.Cyan);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"Decryption Error: {ex.Message}", Color.Red);
+                    Log($"[ERROR] Decryption Error: {ex.Message}", Color.Red);
                 }
             }
         }
@@ -243,7 +264,7 @@ namespace ECC_Demo
         {
             if (_stream == null || _sharedSecret == null)
             {
-                Log("Not connected or Handshake incomplete.", Color.Red);
+                Log("[ERROR] Not connected or Handshake incomplete.", Color.Red);
                 return;
             }
 
@@ -258,7 +279,7 @@ namespace ECC_Demo
                     aes.GenerateIV();
 
                     byte[] plainBytes = Encoding.UTF8.GetBytes(text);
-                    
+
                     using (var encryptor = aes.CreateEncryptor())
                     {
                         byte[] cipherBytes = encryptor.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
@@ -269,16 +290,18 @@ namespace ECC_Demo
                         Array.Copy(cipherBytes, 0, payload, aes.IV.Length, cipherBytes.Length);
 
                         await SendPacketAsync(2, payload);
-                        
-                        Log($"Me: {text}", Color.Cyan); // Show own message locally (plaintext)
-                        Log($"[Sent Encrypted ({payload.Length} bytes)]", Color.Gray);
+
+                        Log($"[ME] {text}", Color.White);
+                        Log($"     [Encrypted] IV: {BitConverter.ToString(aes.IV).Replace("-", "")}", Color.Gray);
+                        Log($"     [Encrypted] Cipher: {BitConverter.ToString(cipherBytes).Replace("-", "")}", Color.Gray);
+
                         txtMessageInput.Clear();
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log($"Encryption/Send Error: {ex.Message}", Color.Red);
+                Log($"[ERROR] Encryption/Send Error: {ex.Message}", Color.Red);
             }
         }
 
@@ -296,11 +319,14 @@ namespace ECC_Demo
                 rtbChatLog.SelectionColor = color;
                 rtbChatLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
                 rtbChatLog.SelectionColor = rtbChatLog.ForeColor;
+                rtbChatLog.ScrollToCaret();
             }
         }
 
 
-        // --- TAB 2: File Notary (ECDSA) ---
+        // ========================================================================
+        // TAB 2: File Notary (ECDSA)
+        // ========================================================================
 
         private void btnSignFile_Click(object sender, EventArgs e)
         {
@@ -310,35 +336,50 @@ namespace ECC_Demo
                 {
                     try
                     {
+                        Log("---------------------------------------------------------------", Color.Gray);
+                        Log($"[ECDSA] Loading file: {Path.GetFileName(ofd.FileName)}", Color.Cyan);
                         byte[] data = File.ReadAllBytes(ofd.FileName);
-                        
+                        Log($"        Size: {data.Length} bytes", Color.Gray);
+
                         // Generate new Signing Keys
+                        Log("[ECDSA] Generating new P-256 Signing Keypair...", Color.White);
                         using (ECDsaCng dsa = new ECDsaCng(256))
                         {
                             dsa.HashAlgorithm = CngAlgorithm.Sha256;
-                            
+
                             // Sign
-                            byte[] signature = dsa.SignData(data); // SHA256 implicitly
+                            Log("[ECDSA] Hashing data (SHA-256) and creating signature...", Color.White);
+                            byte[] signature = dsa.SignData(data);
+
+                            string sigBase64 = Convert.ToBase64String(signature);
+                            Log($"[ECDSA] Signature Generated ({signature.Length} bytes)!", Color.Lime);
+                            Log($"        Sig: {sigBase64.Substring(0, 50)}...", Color.Lime);
 
                             // Export Public Key
-                            #pragma warning disable SYSLIB0043
+#pragma warning disable SYSLIB0043
                             byte[] publicKey = dsa.Key.Export(CngKeyBlobFormat.EccPublicBlob);
-                            #pragma warning restore SYSLIB0043
+#pragma warning restore SYSLIB0043
 
                             // Save .sig and .pub
                             string sigPath = ofd.FileName + ".sig";
                             string pubPath = ofd.FileName + ".pub";
-                            
+
                             File.WriteAllBytes(sigPath, signature);
                             File.WriteAllBytes(pubPath, publicKey);
 
                             lblNotaryStatus.Text = "Status: File Signed Successfully!";
                             lblNotaryStatus.ForeColor = Color.Green;
-                            MessageBox.Show($"Created:\n{sigPath}\n{pubPath}", "Signing Complete");
+
+                            Log($"[ECDSA] Saved signature to: {Path.GetFileName(sigPath)}", Color.White);
+                            Log($"[ECDSA] Saved public key to: {Path.GetFileName(pubPath)}", Color.White);
+                            Log("---------------------------------------------------------------", Color.Gray);
+
+                            MessageBox.Show($"Created:\n{Path.GetFileName(sigPath)}\n{Path.GetFileName(pubPath)}", "Signing Complete");
                         }
                     }
                     catch (Exception ex)
                     {
+                        Log($"[ERROR] Signing Error: {ex.Message}", Color.Red);
                         MessageBox.Show($"Signing Error: {ex.Message}");
                     }
                 }
@@ -347,12 +388,8 @@ namespace ECC_Demo
 
         private void btnVerifyFile_Click(object sender, EventArgs e)
         {
-            // We need 3 files: Original, .sig, .pub
             string? origFile = null, sigFile = null, keyFile = null;
 
-            // Simple flow: user picks original, we assume .sig and .pub are same name, 
-            // OR we ask for all 3. Prompt says "Opens OpenFileDialog three times".
-            
             using (OpenFileDialog ofd = new OpenFileDialog() { Title = "1. Select ORIGINAL File" })
             {
                 if (ofd.ShowDialog() != DialogResult.OK) return;
@@ -373,35 +410,44 @@ namespace ECC_Demo
 
             try
             {
+                Log("---------------------------------------------------------------", Color.Gray);
+                Log("[ECDSA] Starting Verification...", Color.Cyan);
+                Log($"        Original: {Path.GetFileName(origFile)}", Color.Gray);
+                Log($"        Signature: {Path.GetFileName(sigFile)}", Color.Gray);
+
                 byte[] data = File.ReadAllBytes(origFile);
                 byte[] signature = File.ReadAllBytes(sigFile);
                 byte[] keyBytes = File.ReadAllBytes(keyFile);
 
+                Log("[ECDSA] Importing Public Key...", Color.White);
                 using (CngKey key = CngKey.Import(keyBytes, CngKeyBlobFormat.EccPublicBlob))
                 using (ECDsaCng dsa = new ECDsaCng(key))
                 {
                     dsa.HashAlgorithm = CngAlgorithm.Sha256;
-                    
+
+                    Log("[ECDSA] Verifying data hash against signature...", Color.White);
                     bool valid = dsa.VerifyData(data, signature);
 
                     if (valid)
                     {
                         lblNotaryStatus.Text = "Status: VALID SIGNATURE";
                         lblNotaryStatus.ForeColor = Color.Green;
-                        Log("[Notary] Signature Valid verified.", Color.Lime);
+                        Log("[ECDSA] RESULT: VALID SIGNATURE. File is Authentic.", Color.Lime);
                         MessageBox.Show("Signature is VALID.", "Verification Result", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     else
                     {
                         lblNotaryStatus.Text = "Status: TAMPERED / INVALID";
                         lblNotaryStatus.ForeColor = Color.Red;
-                        Log("[Notary] Signature INVALID.", Color.Red);
+                        Log("[ECDSA] RESULT: INVALID. The file has been TAMPERED with!", Color.Red);
                         MessageBox.Show("Signature is INVALID.", "Verification Result", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
+                    Log("---------------------------------------------------------------", Color.Gray);
                 }
             }
             catch (Exception ex)
             {
+                Log($"[ERROR] Verification Error: {ex.Message}", Color.Red);
                 MessageBox.Show($"Verification Error: {ex.Message}");
             }
         }
